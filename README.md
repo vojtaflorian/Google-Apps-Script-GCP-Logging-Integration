@@ -1,4 +1,4 @@
-# Google Apps Script - GCP Logging Integration
+# Google Apps Script - GCP Logging Integration [GAS][GCP]
 
 This Google Apps Script (GAS) enables logging of messages from Google Sheets to Google Cloud Logging. It uses OAuth2 authentication to securely connect to Google Cloud Platform (GCP) and logs messages with relevant metadata, including the active document name, user email, and function name.
 
