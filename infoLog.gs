@@ -12,40 +12,98 @@ var logQueue = [];
 var MAX_QUEUE_SIZE = 3; // Sníženo na 3, aby se logy posílaly častěji
 var lastFlushTime = new Date().getTime();
 var FLUSH_INTERVAL_MS = 5000; // Sníženo na 5 sekund
+
 // Globální proměnná pro sledování, jestli je Toast zobrazován
 var lastToastTime = 0;
-var TOAST_COOLDOWN_MS = 1000; // 1 sekunda mezi zobrazením Toast zpráv
+var TOAST_COOLDOWN_MS = 250; // 1 sekunda mezi zobrazením Toast zpráv
 
 // Token cache
 var cachedToken = null;
 var tokenExpiry = null;
 
-// Trigger pro automatické odesílání logů
-function setupTrigger() {
-  // Odstraníme existující trigger, pokud existuje
-  var triggers = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === 'autoFlushLogs') {
-      ScriptApp.deleteTrigger(triggers[i]);
+// Log úrovně v pořadí dle závažnosti (od nejnižší po nejvyšší)
+var LOG_LEVELS = {
+  DEBUG: 0,
+  INFO: 1,
+  WARNING: 2,
+  ERROR: 3,
+  CRITICAL: 4
+};
+/**
+ * HLAVNÍ PROMĚNNÁ PRO ÚROVEŇ LOGOVÁNÍ!
+ * Pokud byste někdy potřeboval dočasně vidět i DEBUG logy během ladění konkrétní funkce, můžete použít:
+javascriptinfoLog.withLogLevel(function() {
+  infoLog.logDebug("Detailní informace pro ladění");
+  // další kód...
+}, 'DEBUG');
+Tento kód dočasně sníží úroveň logování pro daný blok kódu a poté ji vrátí zpět na WARNING.
+ */
+// Výchozí úroveň pro logování - vše nad touto úrovní bude zaznamenáno
+var currentLogLevel = LOG_LEVELS.DEBUG; // Výchozí hodnota je INFO
+
+/**
+ * Nastaví minimální úroveň logování.
+ * Logy s nižší úrovní nebudou odeslány do GCP.
+ * 
+ * @param {string} levelName - Název úrovně ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
+ * @returns {boolean} - Úspěch nastavení
+ */
+function setLogLevel(levelName) {
+  try {
+    levelName = levelName.toUpperCase();
+    if (LOG_LEVELS.hasOwnProperty(levelName)) {
+      currentLogLevel = LOG_LEVELS[levelName];
+      writeLog("Úroveň logování nastavena na: " + levelName, LOG_LEVELS.INFO, true);
+      return true;
+    } else {
+      writeLog("Neplatná úroveň logování: " + levelName, LOG_LEVELS.ERROR, true);
+      return false;
+    }
+  } catch (e) {
+    Logger.log("Chyba při nastavení úrovně logování: " + e.toString());
+    return false;
+  }
+}
+
+/**
+ * Vrátí aktuální název úrovně logování
+ * 
+ * @returns {string} - Název aktuální úrovně
+ */
+function getLogLevelName() {
+  for (var key in LOG_LEVELS) {
+    if (LOG_LEVELS[key] === currentLogLevel) {
+      return key;
+    }
+  }
+  return "UNKNOWN";
+}
+
+/**
+ * Hlavní logovací funkce - všechny ostatní metody volají tuto.
+ * Zpětně kompatibilní s původním voláním.
+ * 
+ * @param {string} message - Zpráva k zalogování
+ * @param {number} [level=LOG_LEVELS.INFO] - Úroveň závažnosti logu
+ * @param {boolean} [forceLog=false] - Ignorovat filtrování dle úrovně
+ */
+function writeLog(message, level, forceLog) {
+  // Zpětná kompatibilita - odhadnutí úrovně z textu zprávy
+  if (level === undefined) {
+    level = LOG_LEVELS.INFO;
+    var messageLower = message.toLowerCase();
+    if (messageLower.includes('chyba') || messageLower.includes('error')) {
+      level = LOG_LEVELS.ERROR;
+    } else if (messageLower.includes('warning') || messageLower.includes('varování')) {
+      level = LOG_LEVELS.WARNING;
     }
   }
   
-  // Vytvoříme nový trigger, který bude spouštět autoFlushLogs každou minutu
-  ScriptApp.newTrigger('autoFlushLogs')
-    .timeBased()
-    .everyMinutes(1)
-    .create();
-}
-
-// Automatický flush logů volaný z triggeru
-function autoFlushLogs() {
-  if (logQueue.length > 0) {
-    flushLogs();
+  // Filtrace dle úrovně logování
+  if (!forceLog && level < currentLogLevel) {
+    return; // Přeskočí zprávy s nižší prioritou než je nastaveno
   }
-}
 
-// Funkce writeLog zůstává téměř stejná
-function writeLog(message) {
   try {
     var doc = null;
     var documentName = "N/A";
@@ -75,19 +133,36 @@ function writeLog(message) {
       documentUrl: documentUrl,
       userEmail: userEmail,
       functionName: functionName,
-      timestamp: new Date().toISOString() // Přidáno pro lepší debugování
+      timestamp: new Date().toISOString(),
+      logLevel: getLogLevelName() // Přidána informace o úrovni
     };
     
-    var severity = 'INFO';
-    var messageLower = message.toLowerCase();
-    if (messageLower.includes('chyba') || messageLower.includes('error')) {
-      severity = 'ERROR';
-    } else if (messageLower.includes('warning') || messageLower.includes('varování')) {
-      severity = 'WARNING';
+    // Převod úrovně na textovou reprezentaci pro GCP
+    var severity;
+    switch(level) {
+      case LOG_LEVELS.DEBUG:
+        severity = 'DEBUG';
+        break;
+      case LOG_LEVELS.INFO:
+        severity = 'INFO';
+        break;
+      case LOG_LEVELS.WARNING:
+        severity = 'WARNING';
+        break;
+      case LOG_LEVELS.ERROR:
+        severity = 'ERROR';
+        break;
+      case LOG_LEVELS.CRITICAL:
+        severity = 'CRITICAL';
+        break;
+      default:
+        severity = 'DEFAULT';
     }
     
-    // Zobrazení Toast zprávy uživateli
-    showToastMessage(message, severity);
+    // Zobrazení Toast zprávy uživateli (jen pro INFO a vyšší)
+    if (level >= LOG_LEVELS.INFO) {
+      showToastMessage(message, severity);
+    }
     
     // Přidání do fronty
     logQueue.push({
@@ -98,19 +173,67 @@ function writeLog(message) {
       "timestamp": new Date().toISOString()
     });
     
-    // DŮLEŽITÁ ZMĚNA: Vždy flush po přidání zprávy
-    // Toto zajistí, že logy jsou odeslány téměř okamžitě
+    // Vždy flush po přidání zprávy
     flushLogs();
     
   } catch (e) {
     Logger.log("Kritická chyba v writeLog: " + e.toString());
-    // Zde by mohl být fallback pro zápis do SpreadsheetApp.getActiveSpreadsheet() do buňky
   }
 }
+
+/**
+ * Logovací metoda pro úroveň DEBUG
+ * @param {string} message - Zpráva k zalogování
+ */
+function writeLogDebug(message) {
+  writeLog(message, LOG_LEVELS.DEBUG);
+}
+
+/**
+ * Logovací metoda pro úroveň INFO
+ * @param {string} message - Zpráva k zalogování
+ */
+function writeLogInfo(message) {
+  writeLog(message, LOG_LEVELS.INFO);
+}
+
+/**
+ * Logovací metoda pro úroveň WARNING
+ * @param {string} message - Zpráva k zalogování
+ */
+function writeLogWarning(message) {
+  writeLog(message, LOG_LEVELS.WARNING);
+}
+
+/**
+ * Logovací metoda pro úroveň ERROR
+ * @param {string} message - Zpráva k zalogování
+ */
+function writeLogError(message) {
+  writeLog(message, LOG_LEVELS.ERROR);
+}
+
+/**
+ * Logovací metoda pro úroveň CRITICAL
+ * @param {string} message - Zpráva k zalogování
+ */
+function writeLogCritical(message) {
+  writeLog(message, LOG_LEVELS.CRITICAL);
+}
+
+// Alias metody pro jednoduchost
+var logDebug = writeLogDebug;
+var logInfo = writeLogInfo;
+var logWarning = writeLogWarning;
+var logError = writeLogError;
+var logCritical = writeLogCritical;
 
 // Zbytek funkcí zůstává stejný, ale přidáme sync flag
 var isFlushingLogs = false;
 
+/**
+ * Odešle všechny zprávy z fronty do Google Cloud Logging.
+ */
 function flushLogs() {
   if (logQueue.length === 0 || isFlushingLogs) return;
   
@@ -161,6 +284,7 @@ function forceLogs() {
 
 /**
  * Získá název logu z nastavení projektu.
+ * @returns {string} Název logu nebo "defaultLog" v případě chyby
  */
 function getLogName() {
   try {
@@ -174,11 +298,16 @@ function getLogName() {
 
 /**
  * Získá klíč služebního účtu z nastavení projektu.
+ * @returns {Object} Klíč služebního účtu jako objekt
+ * @throws {Error} Pokud klíč není k dispozici nebo není validní
  */
 function getServiceAccountKey() {
   try {
     var scriptProperties = PropertiesService.getScriptProperties();
     var keyString = scriptProperties.getProperty('SERVICE_ACCOUNT_KEY');
+    if (!keyString) {
+      throw new Error("SERVICE_ACCOUNT_KEY není nastaven v PropertiesService");
+    }
     return JSON.parse(keyString);
   } catch (e) {
     Logger.log("Nelze získat nebo parsovat SERVICE_ACCOUNT_KEY: " + e.toString());
@@ -188,6 +317,8 @@ function getServiceAccountKey() {
 
 /**
  * Vytvoří OAuth2 službu pro autentizaci.
+ * @returns {OAuth2.Service} OAuth2 služba pro přístup ke Google Cloud API
+ * @throws {Error} Pokud se službu nepodaří vytvořit
  */
 function getOAuthService() {
   try {
@@ -207,6 +338,8 @@ function getOAuthService() {
 
 /**
  * Získá přístupový token pro Google Cloud API.
+ * @returns {string} Access token pro volání Google Cloud API
+ * @throws {Error} Pokud se token nepodaří získat
  */
 function getAccessToken() {
   try {
@@ -234,6 +367,7 @@ function getAccessToken() {
 
 /**
  * Zjistí název volající funkce z call stacku.
+ * @returns {string} Název volající funkce nebo "unknown" v případě chyby
  */
 function getCallerFunctionName() {
   try {
@@ -255,8 +389,9 @@ function getCallerFunctionName() {
 /**
  * Zobrazí zprávu uživateli pomocí Toast notifikace.
  * Součást writeLog funkce pro okamžitou zpětnou vazbu.
- * @param {string} message Zpráva k zobrazení
- * @param {string} severity Závažnost zprávy (INFO, WARNING, ERROR)
+ * 
+ * @param {string} message - Zpráva k zobrazení
+ * @param {string} severity - Závažnost zprávy ('INFO', 'WARNING', 'ERROR', 'CRITICAL')
  */
 function showToastMessage(message, severity) {
   try {
@@ -275,6 +410,12 @@ function showToastMessage(message, severity) {
         } else if (severity === 'ERROR') {
           title = "❌ Chyba";
           duration = 10;
+        } else if (severity === 'CRITICAL') {
+          title = "🚨 KRITICKÁ CHYBA";
+          duration = 15;
+        } else if (severity === 'DEBUG') {
+          title = "🔍 Debug";
+          duration = 3;
         }
         
         // Zobrazení Toast zprávy
@@ -289,17 +430,144 @@ function showToastMessage(message, severity) {
 }
 
 /**
+ * Trigger pro automatické odesílání logů
+ */
+function setupTrigger() {
+  try {
+    // Odstraníme existující trigger, pokud existuje
+    var triggers = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() === 'autoFlushLogs') {
+        ScriptApp.deleteTrigger(triggers[i]);
+      }
+    }
+    
+    // Vytvoříme nový trigger, který bude spouštět autoFlushLogs každou minutu
+    ScriptApp.newTrigger('autoFlushLogs')
+      .timeBased()
+      .everyMinutes(1)
+      .create();
+      
+    Logger.log("Trigger pro autoFlushLogs úspěšně nastaven");
+    return true;
+  } catch (e) {
+    Logger.log("Chyba při nastavování triggeru: " + e.toString());
+    return false;
+  }
+}
+
+/**
+ * Automatický flush logů volaný z triggeru
+ */
+function autoFlushLogs() {
+  if (logQueue.length > 0) {
+    flushLogs();
+  }
+}
+
+/**
+ * Dočasně zvýší úroveň logování pro spuštění určité funkce.
+ * Po dokončení funkce vrátí původní úroveň logování.
+ * 
+ * @param {function} func - Funkce, která se má spustit s vyšší úrovní logování
+ * @param {string} level - Dočasná úroveň logování ('DEBUG', 'INFO', ...)
+ * @returns {*} - Návratová hodnota funkce
+ */
+function withLogLevel(func, level) {
+  var originalLevel = currentLogLevel;
+  try {
+    setLogLevel(level);
+    return func();
+  } finally {
+    currentLogLevel = originalLevel;
+  }
+}
+
+/**
+ * Uloží nastavení úrovně logování do vlastností skriptu pro zachování mezi voláními.
+ * @returns {boolean} True pokud se nastavení podařilo uložit
+ */
+function saveLogLevelSetting() {
+  try {
+    var scriptProperties = PropertiesService.getScriptProperties();
+    scriptProperties.setProperty('LOG_LEVEL', getLogLevelName());
+    return true;
+  } catch (e) {
+    Logger.log("Nelze uložit nastavení úrovně logování: " + e.toString());
+    return false;
+  }
+}
+
+/**
+ * Načte uloženou úroveň logování z vlastností skriptu.
+ * @returns {boolean} True pokud se nastavení podařilo načíst
+ */
+function loadLogLevelSetting() {
+  try {
+    var scriptProperties = PropertiesService.getScriptProperties();
+    var savedLevel = scriptProperties.getProperty('LOG_LEVEL');
+    if (savedLevel && LOG_LEVELS.hasOwnProperty(savedLevel)) {
+      currentLogLevel = LOG_LEVELS[savedLevel];
+      return true;
+    }
+    return false;
+  } catch (e) {
+    Logger.log("Nelze načíst nastavení úrovně logování: " + e.toString());
+    return false;
+  }
+}
+
+/**
  * Testovací funkce pro ověření, že logování funguje.
  */
 function testLogging() {
   Logger.log("Začátek testu logování");
   
-  writeLog("Test zpráva 1");
-  writeLog("Test zpráva s varováním");
-  writeLog("Test zpráva s chybou");
+  // Uložíme původní úroveň logování
+  var originalLevel = currentLogLevel;
   
-  // Explicitní flush
-  forceLogs();
+  try {
+    // Nastavíme úroveň na DEBUG pro test všech úrovní
+    setLogLevel('DEBUG');
+    
+    // Test všech úrovní logování
+    writeLogDebug("Test zpráva DEBUG úrovně");
+    writeLogInfo("Test zpráva INFO úrovně");
+    writeLogWarning("Test zpráva WARNING úrovně");
+    writeLogError("Test zpráva ERROR úrovně");
+    writeLogCritical("Test zpráva CRITICAL úrovně");
+    
+    // Test aliasů
+    logDebug("Test DEBUG pomocí aliasu");
+    logInfo("Test INFO pomocí aliasu");
+    
+    // Test zpětné kompatibility
+    writeLog("Automaticky detekováno jako INFO");
+    writeLog("Toto je varování, automaticky detekováno", LOG_LEVELS.WARNING);
+    writeLog("Chyba v systému, automaticky detekována");
+    
+    // Test filtrace logů
+    setLogLevel('WARNING');
+    writeLogDebug("Tato DEBUG zpráva by neměla být poslána do GCP"); // Nebude odesláno
+    writeLogInfo("Tato INFO zpráva by neměla být poslána do GCP");   // Nebude odesláno
+    writeLogWarning("Tato WARNING zpráva bude poslána do GCP");      // Bude odesláno
+    
+    // Test funkce withLogLevel
+    withLogLevel(function() {
+      writeLogDebug("Tato DEBUG zpráva bude dočasně poslána do GCP");
+      writeLogInfo("Tato INFO zpráva bude dočasně poslána do GCP");
+    }, 'DEBUG');
+    
+    // Test vynuceného logování
+    writeLogDebug("Tato DEBUG zpráva bude poslána navzdory nastavení", LOG_LEVELS.DEBUG, true);
+    
+    // Explicitní flush
+    forceLogs();
+    
+  } finally {
+    // Obnovíme původní úroveň logování
+    currentLogLevel = originalLevel;
+  }
   
   Logger.log("Test logování dokončen");
 }

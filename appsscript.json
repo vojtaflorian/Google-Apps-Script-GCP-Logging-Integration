@@ -1,14 +1,22 @@
 {
   "timeZone": "Europe/Prague",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
   "dependencies": {
     "libraries": [
       {
         "userSymbol": "OAuth2",
         "version": "43",
         "libraryId": "1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF"
-      }
+       }
     ]
   },
-  "exceptionLogging": "STACKDRIVER",
-  "runtimeVersion": "V8"
+  "oauthScopes": [
+  "https://www.googleapis.com/auth/script.external_request",
+  "https://www.googleapis.com/auth/logging.write",
+  "https://www.googleapis.com/auth/spreadsheets.currentonly",
+  "https://www.googleapis.com/auth/spreadsheets",
+  "https://www.googleapis.com/auth/script.container.ui",
+  "https://www.googleapis.com/auth/userinfo.email"
+  ]
 }
